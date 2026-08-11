@@ -62,7 +62,7 @@ jobs:
 
       - name: Upload PTK SARIF
         if: always() && steps.ptk.outputs.sarif-file != ''
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           sarif_file: ${{ steps.ptk.outputs.sarif-file }}
           category: owasp-ptk
@@ -111,6 +111,15 @@ validation. Normal users should select an exact published version through
 
 SARIF upload remains explicit so each repository controls its own Code
 Scanning permissions, category, retention, and fork policy.
+
+GitHub Code Scanning maps findings to files in the checked-out repository and
+rejects web URLs as physical SARIF locations. PTK keeps valid repository file
+locations unchanged. Findings against browser-loaded scripts, HTTP endpoints,
+and other runtime-only artifacts are mapped to the generated
+`github-code-scanning-runtime-findings.txt` file inside `output-dir` (by
+default `.ptk/artifacts`). The original target and script URLs remain in each
+finding's message and SARIF properties, and the complete PTK scan artifacts
+remain available in `output-dir`.
 
 ## Authentication and extra arguments
 

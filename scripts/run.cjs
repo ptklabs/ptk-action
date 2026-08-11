@@ -5,11 +5,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { fileURLToPath } = require('url');
 
 const SUPPORTED_ENGINES = Object.freeze(['DAST', 'IAST', 'SAST', 'SCA']);
 const SUPPORTED_THRESHOLDS = Object.freeze(['critical', 'high', 'medium', 'low', 'info', 'none']);
 const EXACT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const OFFICIAL_NPM_REGISTRY = 'https://registry.npmjs.org/';
+const GITHUB_RUNTIME_LOCATIONS_FILE = 'github-code-scanning-runtime-findings.txt';
 const DIRECT_CREDENTIAL_FLAGS = new Set(['--username', '--password']);
 const EXTRA_ARG_SPECS = Object.freeze({
   '--scenario': { type: 'file' },
@@ -334,6 +336,13 @@ function writeOutput(outputFile, name, value) {
   fs.appendFileSync(outputFile, `${name}=${safeValue}\n`, { encoding: 'utf8' });
 }
 
+function toSarifRelativeUri(workspace, value) {
+  return toWorkspaceRelative(workspace, value)
+    .split('/')
+    .map(segment => encodeURIComponent(segment))
+    .join('/');
+}
+
 function buildScanArgs({ target, engines, failOn, outputDirectory, sarif, sarifFile, extraArgs }) {
   const args = [target, ...extraArgs];
   args.push(
@@ -414,6 +423,164 @@ function assertGeneratedFile(workspace, filePath, label) {
   const lstat = fs.lstatSync(filePath);
   if (lstat.isSymbolicLink() || !lstat.isFile()) fail(`${label} must be a regular file`);
   assertInside(workspace, fs.realpathSync(filePath), label);
+}
+
+function visitArtifactLocations(value, visitor, seen = new Set()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return;
+  seen.add(value);
+  if (value.artifactLocation && typeof value.artifactLocation === 'object') {
+    visitor(value.artifactLocation, value);
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (key !== 'artifactLocation') visitArtifactLocations(child, visitor, seen);
+  }
+}
+
+function normalizeRepositoryArtifactUri(workspace, uri) {
+  if (typeof uri !== 'string' || uri.trim() === '') return null;
+  const value = uri.trim();
+  let candidate;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'file:') return null;
+    candidate = fileURLToPath(parsed);
+  } catch {
+    let decoded;
+    try {
+      decoded = value
+        .split(/[?#]/, 1)[0]
+        .split('/')
+        .map(segment => decodeURIComponent(segment))
+        .join(path.sep);
+    } catch {
+      return null;
+    }
+    candidate = path.resolve(workspace, decoded);
+  }
+  if (!isInside(workspace, candidate) || !fs.existsSync(candidate)) return null;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(candidate);
+    if (!isInside(workspace, resolved) || !fs.statSync(resolved).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return toSarifRelativeUri(workspace, resolved);
+}
+
+function evidenceText(value) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 8192);
+}
+
+function writeTextAtomically(filePath, contents) {
+  const temporary = `${filePath}.ptk-action-${process.pid}.tmp`;
+  let created = false;
+  try {
+    fs.writeFileSync(temporary, contents, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600
+    });
+    created = true;
+    fs.renameSync(temporary, filePath);
+  } finally {
+    if (created) fs.rmSync(temporary, { force: true });
+  }
+}
+
+function writeJsonAtomically(filePath, value) {
+  writeTextAtomically(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function normalizeSarifForGitHub(workspace, outputDirectory, sarifFile) {
+  assertGeneratedFile(workspace, sarifFile, 'SARIF report');
+  let sarif;
+  try {
+    sarif = JSON.parse(fs.readFileSync(sarifFile, 'utf8'));
+  } catch (error) {
+    fail(`SARIF report is not valid JSON: ${error.message}`);
+  }
+  if (sarif.version !== '2.1.0' || !Array.isArray(sarif.runs)) {
+    fail('SARIF report must use version 2.1.0 and contain a runs array');
+  }
+
+  let runtimeFile = path.join(outputDirectory, GITHUB_RUNTIME_LOCATIONS_FILE);
+  if (path.resolve(runtimeFile) === path.resolve(sarifFile)) {
+    runtimeFile = path.join(outputDirectory, `github-code-scanning-runtime-findings-1.txt`);
+  }
+  const runtimeUri = toSarifRelativeUri(workspace, runtimeFile);
+  const evidenceLines = [];
+
+  for (const run of sarif.runs) {
+    if (!run || typeof run !== 'object' || run.results === undefined) continue;
+    if (!Array.isArray(run.results)) fail('Each SARIF run results value must be an array');
+    for (const result of run.results) {
+      if (!result || typeof result !== 'object') continue;
+      const remappedUris = new Set();
+      const remappedLocations = [];
+      visitArtifactLocations(result, (artifactLocation, location) => {
+        if (typeof artifactLocation.uri !== 'string') return;
+        const repositoryUri = normalizeRepositoryArtifactUri(workspace, artifactLocation.uri);
+        if (repositoryUri) {
+          artifactLocation.uri = repositoryUri;
+          delete artifactLocation.uriBaseId;
+          delete artifactLocation.index;
+          return;
+        }
+        remappedUris.add(artifactLocation.uri);
+        remappedLocations.push({ artifactLocation, location });
+      });
+      if (remappedLocations.length === 0) continue;
+
+      const line = evidenceLines.length + 1;
+      const message = evidenceText(result.message && result.message.text);
+      const ruleId = evidenceText(result.ruleId || 'PTK/runtime-finding');
+      const originalUris = [...remappedUris].slice(0, 32).map(value => evidenceText(value).slice(0, 2048)).filter(Boolean);
+      evidenceLines.push(evidenceText(
+        `${ruleId} | ${message || 'Runtime finding'}${originalUris.length ? ` | artifacts=${originalUris.join(', ')}` : ''}`
+      ));
+      for (const { artifactLocation, location } of remappedLocations) {
+        artifactLocation.uri = runtimeUri;
+        delete artifactLocation.uriBaseId;
+        delete artifactLocation.index;
+        location.region = { startLine: line, startColumn: 1 };
+      }
+      result.properties = result.properties && typeof result.properties === 'object' && !Array.isArray(result.properties)
+        ? result.properties
+        : {};
+      result.properties.githubCodeScanningLocation = 'runtime-evidence';
+      if (originalUris.length > 0) result.properties.runtimeArtifactUris = originalUris;
+    }
+  }
+
+  if (evidenceLines.length > 0) {
+    assertSafeExistingOutput(runtimeFile, 'file', 'GitHub Code Scanning runtime evidence');
+    writeTextAtomically(runtimeFile, `${evidenceLines.join('\n')}\n`);
+    assertGeneratedFile(workspace, runtimeFile, 'GitHub Code Scanning runtime evidence');
+  }
+
+  visitArtifactLocations(sarif, artifactLocation => {
+    if (typeof artifactLocation.uri !== 'string') return;
+    let protocol = null;
+    try {
+      protocol = new URL(artifactLocation.uri).protocol;
+    } catch {
+      return;
+    }
+    if (protocol !== 'file:') {
+      fail(`SARIF report still contains an unsupported artifact URI scheme: ${protocol}`);
+    }
+  });
+  writeJsonAtomically(sarifFile, sarif);
+  assertGeneratedFile(workspace, sarifFile, 'SARIF report');
+  return {
+    remappedResults: evidenceLines.length,
+    runtimeFile: evidenceLines.length > 0 ? runtimeFile : null
+  };
 }
 
 function run(env = process.env, dependencies = {}) {
@@ -498,7 +665,7 @@ function run(env = process.env, dependencies = {}) {
       allowFailure: true
     });
 
-    if (sarif) assertGeneratedFile(workspace, sarifFile, 'SARIF report');
+    if (sarif) normalizeSarifForGitHub(workspace, outputDirectory, sarifFile);
     if (status !== 0) {
       process.stderr.write(`OWASP PTK scan failed with exit code ${status}; generated artifacts were preserved.\n`);
     }
@@ -519,10 +686,12 @@ if (require.main === module) {
 
 module.exports = {
   EXTRA_ARG_SPECS,
+  GITHUB_RUNTIME_LOCATIONS_FILE,
   OFFICIAL_NPM_REGISTRY,
   buildScanArgs,
   createNpmInstallEnvironment,
   isInside,
+  normalizeSarifForGitHub,
   parseBoolean,
   parseEngines,
   parseExactSemver,

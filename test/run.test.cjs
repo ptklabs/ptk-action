@@ -7,9 +7,11 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+  GITHUB_RUNTIME_LOCATIONS_FILE,
   OFFICIAL_NPM_REGISTRY,
   buildScanArgs,
   createNpmInstallEnvironment,
+  normalizeSarifForGitHub,
   parseBoolean,
   parseEngines,
   parseExactSemver,
@@ -231,6 +233,111 @@ test('writes command-file outputs without accepting multiline values', t => {
   writeOutput(output, 'sarif-file', 'ptk-results.sarif');
   assert.equal(fs.readFileSync(output, 'utf8'), 'sarif-file=ptk-results.sarif\n');
   assert.throws(() => writeOutput(output, 'unsafe', 'first\nsecond'), /single line/);
+});
+
+test('normalizes runtime SARIF locations for GitHub while preserving repository files and URLs', t => {
+  const workspace = temporaryDirectory(t);
+  const outputDirectory = path.join(workspace, '.ptk', 'artifacts');
+  const sourceDirectory = path.join(workspace, 'src');
+  const sarifFile = path.join(workspace, 'ptk-results.sarif');
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  fs.mkdirSync(sourceDirectory);
+  fs.writeFileSync(path.join(sourceDirectory, 'app.js'), 'document.body.textContent = "safe";\n');
+  fs.writeFileSync(sarifFile, JSON.stringify({
+    version: '2.1.0',
+    runs: [{
+      tool: { driver: { name: 'OWASP PTK' } },
+      results: [
+        {
+          ruleId: 'SAST/local-source',
+          message: { text: 'Repository source finding' },
+          locations: [{
+            physicalLocation: {
+              artifactLocation: { uri: 'src/app.js' },
+              region: { startLine: 1, startColumn: 1 }
+            }
+          }]
+        },
+        {
+          ruleId: 'SAST/remote-source',
+          message: { text: 'Remote browser source finding' },
+          locations: [{
+            physicalLocation: {
+              artifactLocation: { uri: 'https://example.test/assets/app.js' },
+              region: { startLine: 9, startColumn: 3 }
+            }
+          }],
+          properties: { url: 'https://example.test/' }
+        },
+        {
+          ruleId: 'IAST/runtime',
+          message: { text: 'Runtime finding\nwith untrusted line break' },
+          locations: [{
+            physicalLocation: {
+              artifactLocation: { uri: 'ptk-runtime-findings' },
+              region: { startLine: 1, startColumn: 1 }
+            }
+          }]
+        },
+        {
+          ruleId: 'SAST/flow',
+          message: { text: 'Remote code-flow finding' },
+          locations: [{
+            physicalLocation: {
+              artifactLocation: { uri: 'searchParams.value' },
+              region: { startLine: 3, startColumn: 1 }
+            }
+          }],
+          codeFlows: [{ threadFlows: [{ locations: [{ location: {
+            physicalLocation: {
+              artifactLocation: { uri: 'http://example.test/assets/flow.js' },
+              region: { startLine: 4, startColumn: 2 }
+            }
+          } }] }] }]
+        }
+      ]
+    }]
+  }));
+
+  const normalized = normalizeSarifForGitHub(workspace, outputDirectory, sarifFile);
+  assert.equal(normalized.remappedResults, 3);
+  assert.equal(normalized.runtimeFile, path.join(outputDirectory, GITHUB_RUNTIME_LOCATIONS_FILE));
+
+  const sarif = JSON.parse(fs.readFileSync(sarifFile, 'utf8'));
+  const results = sarif.runs[0].results;
+  assert.equal(results[0].locations[0].physicalLocation.artifactLocation.uri, 'src/app.js');
+  const runtimeUri = `.ptk/artifacts/${GITHUB_RUNTIME_LOCATIONS_FILE}`;
+  assert.equal(results[1].locations[0].physicalLocation.artifactLocation.uri, runtimeUri);
+  assert.equal(results[1].locations[0].physicalLocation.region.startLine, 1);
+  assert.deepEqual(results[1].properties.runtimeArtifactUris, ['https://example.test/assets/app.js']);
+  assert.equal(results[2].locations[0].physicalLocation.region.startLine, 2);
+  assert.equal(results[3].locations[0].physicalLocation.region.startLine, 3);
+  assert.equal(
+    results[3].codeFlows[0].threadFlows[0].locations[0].location.physicalLocation.artifactLocation.uri,
+    runtimeUri
+  );
+  assert.deepEqual(results[3].properties.runtimeArtifactUris, [
+    'searchParams.value',
+    'http://example.test/assets/flow.js'
+  ]);
+
+  const evidence = fs.readFileSync(normalized.runtimeFile, 'utf8').trimEnd().split('\n');
+  assert.equal(evidence.length, 3);
+  assert.match(evidence[0], /https:\/\/example\.test\/assets\/app\.js/);
+  assert.match(evidence[1], /Runtime finding with untrusted line break/);
+  assert.match(evidence[2], /http:\/\/example\.test\/assets\/flow\.js/);
+});
+
+test('rejects malformed SARIF instead of exposing an unusable Action output', t => {
+  const workspace = temporaryDirectory(t);
+  const outputDirectory = path.join(workspace, '.ptk', 'artifacts');
+  const sarifFile = path.join(workspace, 'ptk-results.sarif');
+  fs.mkdirSync(outputDirectory, { recursive: true });
+  fs.writeFileSync(sarifFile, JSON.stringify({ version: '2.0.0', runs: [] }));
+  assert.throws(
+    () => normalizeSarifForGitHub(workspace, outputDirectory, sarifFile),
+    /version 2\.1\.0/
+  );
 });
 
 test('isolates npm user configuration and pins the official registry', t => {

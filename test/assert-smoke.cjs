@@ -35,6 +35,33 @@ if (!lifecycle.exportSucceeded || !lifecycle.safeToStop) {
 if (!fs.existsSync(sarifFile) || !fs.statSync(sarifFile).isFile()) throw new Error('SARIF report is missing');
 const sarif = JSON.parse(fs.readFileSync(sarifFile, 'utf8'));
 if (sarif.version !== '2.1.0' || !Array.isArray(sarif.runs)) throw new Error('SARIF report is invalid');
+const sarifResults = sarif.runs.flatMap(run => Array.isArray(run.results) ? run.results : []);
+const sarifEngines = new Set(sarifResults.map(result => result.properties && result.properties.engine).filter(Boolean));
+for (const engine of ['DAST', 'IAST', 'SAST', 'SCA']) {
+  if (!sarifEngines.has(engine)) throw new Error(`${engine} did not produce a SARIF finding in the live fixture`);
+}
+
+function assertGitHubArtifactLocations(value, seen = new Set()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return;
+  seen.add(value);
+  if (value.artifactLocation && typeof value.artifactLocation.uri === 'string') {
+    let protocol = null;
+    try {
+      protocol = new URL(value.artifactLocation.uri).protocol;
+    } catch {
+      // Repository-relative and generated-build locations are expected here.
+    }
+    if (protocol && protocol !== 'file:') {
+      throw new Error(`SARIF contains a GitHub-incompatible artifact URI: ${value.artifactLocation.uri}`);
+    }
+  }
+  for (const child of Object.values(value)) assertGitHubArtifactLocations(child, seen);
+}
+
+assertGitHubArtifactLocations(sarif);
+const runtimeResults = sarifResults.filter(result => result.properties && result.properties.githubCodeScanningLocation === 'runtime-evidence');
+if (runtimeResults.length === 0) throw new Error('SARIF did not normalize runtime findings for GitHub Code Scanning');
+const runtimeUri = runtimeResults[0].locations[0].physicalLocation.artifactLocation.uri;
+if (!fs.existsSync(path.resolve(decodeURIComponent(runtimeUri)))) throw new Error('GitHub Code Scanning runtime evidence file is missing');
 
 process.stdout.write('PTK Action live smoke assertions passed.\n');
-
