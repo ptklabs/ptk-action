@@ -1,0 +1,25 @@
+{
+  "name": "ptk-action",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GitHub Action wrapper for authorized OWASP PTK browser security scans.",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ptklabs/ptk-action.git"
+  },
+  "homepage": "https://github.com/ptklabs/ptk-action#readme",
+  "bugs": {
+    "url": "https://github.com/ptklabs/ptk-action/issues"
+  },
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "node scripts/validate-repository.cjs",
+    "test": "node --test test/*.test.cjs",
+    "test:ci": "npm run lint && npm test"
+  }
+}
+

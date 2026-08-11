@@ -1,0 +1,102 @@
+name: OWASP PTK Security Scan
+description: Run authorized OWASP PTK browser security scans and export SARIF and scan artifacts.
+author: PTK Labs
+
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  target:
+    description: Authorized HTTP or HTTPS target URL. The Action never starts the target application.
+    required: true
+  engines:
+    description: Comma-separated PTK engines to enable (DAST, IAST, SAST, SCA).
+    required: false
+    default: DAST
+  fail-on:
+    description: Fail after artifacts are written when findings meet this severity (critical, high, medium, low, info, none).
+    required: false
+    default: none
+  sarif:
+    description: Write a SARIF report for GitHub Code Scanning.
+    required: false
+    default: "true"
+  sarif-file:
+    description: Workspace-contained SARIF output path, relative to working-directory unless absolute.
+    required: false
+    default: ptk-results.sarif
+  output-dir:
+    description: Workspace-contained PTK artifact directory, relative to working-directory unless absolute.
+    required: false
+    default: .ptk/artifacts
+  working-directory:
+    description: Existing application directory inside GITHUB_WORKSPACE.
+    required: false
+    default: .
+  node-version:
+    description: Node.js version passed to actions/setup-node.
+    required: false
+    default: "24"
+  pentestkit-version:
+    description: Exact pentestkit npm version; tags and ranges are rejected.
+    required: false
+    default: 9.9.8
+  pentestkit-package:
+    description: Optional workspace-contained pentestkit .tgz for package validation before publication.
+    required: false
+    default: ""
+  install-browsers:
+    description: Install Chromium and required Linux browser dependencies through the installed package.
+    required: false
+    default: "true"
+  extra-args:
+    description: Reviewed ptk-scan crawl, scenario, authentication, and agent controls, one argument per line. Unknown, Action-owned, direct-credential, aggressive, and destructive flags are rejected; see the README.
+    required: false
+    default: ""
+
+outputs:
+  sarif-file:
+    description: Workspace-relative SARIF path, or an empty value when SARIF is disabled.
+    value: ${{ steps.scan.outputs.sarif-file }}
+  output-dir:
+    description: Workspace-relative PTK artifact directory.
+    value: ${{ steps.scan.outputs.output-dir }}
+  pentestkit-version:
+    description: Installed pentestkit package version.
+    value: ${{ steps.scan.outputs.pentestkit-version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        package-manager-cache: false
+
+    - name: Cache npm downloads
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ~/.npm
+        key: ptk-action-${{ runner.os }}-${{ runner.arch }}-node-${{ inputs.node-version }}-pentestkit-${{ inputs.pentestkit-version }}
+        restore-keys: |
+          ptk-action-${{ runner.os }}-${{ runner.arch }}-node-${{ inputs.node-version }}-
+
+    - name: Run OWASP PTK
+      id: scan
+      shell: bash
+      env:
+        PTK_ACTION_PATH: ${{ github.action_path }}
+        PTK_INPUT_TARGET: ${{ inputs.target }}
+        PTK_INPUT_ENGINES: ${{ inputs.engines }}
+        PTK_INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        PTK_INPUT_SARIF: ${{ inputs.sarif }}
+        PTK_INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        PTK_INPUT_OUTPUT_DIR: ${{ inputs.output-dir }}
+        PTK_INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        PTK_INPUT_PENTESTKIT_VERSION: ${{ inputs.pentestkit-version }}
+        PTK_INPUT_PENTESTKIT_PACKAGE: ${{ inputs.pentestkit-package }}
+        PTK_INPUT_INSTALL_BROWSERS: ${{ inputs.install-browsers }}
+        PTK_INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: node "$PTK_ACTION_PATH/scripts/run.cjs"

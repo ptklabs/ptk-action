@@ -1,0 +1,39 @@
+name: Validate PTK Action
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ptk-action-validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install exact lockfile
+        run: npm ci --ignore-scripts
+
+      - name: Run repository and unit tests
+        run: npm run test:ci
+
+      - name: Parse YAML
+        run: >-
+          ruby -e 'require "yaml"; Dir["**/*.{yml,yaml}", ".github/**/*.{yml,yaml}"].uniq.each { |file| YAML.safe_load(File.read(file), aliases: true) }'
+
+      - name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7

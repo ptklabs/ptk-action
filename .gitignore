@@ -1,0 +1,7 @@
+node_modules/
+.ptk/
+ptk-results.sarif
+coverage/
+*.log
+.DS_Store
+

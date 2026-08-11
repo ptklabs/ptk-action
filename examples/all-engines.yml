@@ -1,0 +1,52 @@
+name: PTK All Engines
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  ptk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Start application
+        run: |
+          npm ci
+          npm run start:test &
+          for attempt in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:3000 >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Run all PTK engines
+        id: ptk
+        uses: ptklabs/ptk-action@v1
+        with:
+          target: http://127.0.0.1:3000
+          engines: DAST,IAST,SAST,SCA
+          fail-on: none
+          extra-args: |
+            --max-routes
+            12
+
+      - name: Upload PTK SARIF
+        if: always() && steps.ptk.outputs.sarif-file != ''
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+        with:
+          sarif_file: ${{ steps.ptk.outputs.sarif-file }}
+          category: owasp-ptk-all-engines
+
+      - name: Upload PTK artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ptk-all-engine-artifacts
+          path: ${{ steps.ptk.outputs.output-dir }}
+          if-no-files-found: error

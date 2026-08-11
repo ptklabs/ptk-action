@@ -1,0 +1,86 @@
+name: Live PTK Action Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      pentestkit-version:
+        description: Exact published pentestkit version to validate
+        required: true
+        default: 9.9.8
+        type: string
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ptk-action-live-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Start in-scope test application
+        run: |
+          node test/fixture/server.cjs > "$RUNNER_TEMP/ptk-action-fixture.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/ptk-action-fixture.pid"
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:4173/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+      - name: Run local Action with all PTK engines
+        id: ptk
+        uses: ./
+        with:
+          target: http://127.0.0.1:4173/
+          engines: DAST,IAST,SAST,SCA
+          fail-on: none
+          pentestkit-version: ${{ inputs.pentestkit-version }}
+          extra-args: |
+            --max-routes
+            8
+            --crawl-depth
+            2
+            --max-actions-per-route
+            4
+
+      - name: Assert PTK participation and outputs
+        run: node test/assert-smoke.cjs "${{ steps.ptk.outputs.output-dir }}" "${{ steps.ptk.outputs.sarif-file }}"
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && steps.ptk.outputs.sarif-file != '' && hashFiles(steps.ptk.outputs.sarif-file) != ''
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4
+        with:
+          sarif_file: ${{ steps.ptk.outputs.sarif-file }}
+          category: owasp-ptk-action-live-smoke
+
+      - name: Upload PTK artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ptk-action-live-smoke
+          path: |
+            ${{ steps.ptk.outputs.output-dir }}
+            ${{ steps.ptk.outputs.sarif-file }}
+          if-no-files-found: error
+
+      - name: Stop test application
+        if: always()
+        run: |
+          if test -f "$RUNNER_TEMP/ptk-action-fixture.pid"; then
+            kill "$(cat "$RUNNER_TEMP/ptk-action-fixture.pid")" 2>/dev/null || true
+          fi
+
