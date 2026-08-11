@@ -33,7 +33,7 @@ jobs:
         run: |
           node test/fixture/server.cjs > "$RUNNER_TEMP/ptk-action-fixture.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/ptk-action-fixture.pid"
-          for attempt in {1..30}; do
+          for ((attempt = 1; attempt <= 30; attempt += 1)); do
             if curl --fail --silent http://127.0.0.1:4173/health >/dev/null; then
               exit 0
             fi
@@ -83,4 +83,3 @@ jobs:
           if test -f "$RUNNER_TEMP/ptk-action-fixture.pid"; then
             kill "$(cat "$RUNNER_TEMP/ptk-action-fixture.pid")" 2>/dev/null || true
           fi
-
